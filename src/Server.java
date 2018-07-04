@@ -1,173 +1,240 @@
+package ru.nsu.fit;
+
+/**
+ * Created by Станислав on 04.07.2018.
+ */
 import java.io.IOException;
-import java.io.PrintWriter;
 import java.net.*;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.nio.channels.*;
 import java.nio.charset.Charset;
 import java.util.*;
 
 public class Server implements Runnable {
-	private int port;
-	private Map<MyInetStruct, Socket> hosts = new HashMap<>();
+    private InetAddress serverIP;
+    private int serverPort;
 
-	public Server(int port) {
-		this.port = port;
-		new Thread(this).start();
-	}
+    private enum ConnectionState {
+        UNKNOWN, MACHINE, PERSON
+    }
 
-	@Override
-	public void run() {
-		try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()) {
-			serverSocketChannel.configureBlocking(false);
-			ServerSocket serverSocket = serverSocketChannel.socket();
-			serverSocket.bind(new InetSocketAddress(port));
+    private Map<SocketChannel, Integer> hostPorts = new HashMap<>();
+    private Map<SocketChannel, InetAddress> hostIPs = new HashMap<>();
+    private Map<SocketChannel, ConnectionState> hostStates = new HashMap<>();
 
-			Selector selector = Selector.open();
-			serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT); //listen for incoming connections
-			System.out.println(">>listening on port " + port);
+    public Server(String ip, int port) throws UnknownHostException {
+        this.serverIP = InetAddress.getByName(ip);
+        this.serverPort = port;
+        new Thread(this).start();
+    }
 
-			while (true) {
-				int readyChannels = selector.select();
-				if (readyChannels == 0) {
-					continue;
-				}
+    @Override
+    public void run() {
+        try (ServerSocketChannel serverSocketChannel = ServerSocketChannel.open()) {
+            serverSocketChannel.configureBlocking(false);
+            ServerSocket serverSocket = serverSocketChannel.socket();
+            serverSocket.bind(new InetSocketAddress(serverIP, serverPort));
 
-				Set<SelectionKey> keys = selector.selectedKeys();
-				Iterator<SelectionKey> keyIterator = keys.iterator();
-				while (keyIterator.hasNext()) {
-					SelectionKey key = keyIterator.next();
+            Selector selector = Selector.open();
+            serverSocketChannel.register(selector, SelectionKey.OP_ACCEPT); //listen for incoming connections
+            System.out.println(">>listening on port " + serverPort);
 
-					if (key.isAcceptable()) {
-						//incoming connection
-						Socket newSocket = serverSocket.accept();
-						System.out.println(">>accepting new connection from " + newSocket);
+            while (true) {
+                int readyChannels = selector.select();
+                if (readyChannels == 0) {
+                    continue;
+                }
 
-						SocketChannel socketChannel = newSocket.getChannel();
-						socketChannel.configureBlocking(false);
-						socketChannel.register(selector, SelectionKey.OP_READ); //wait for incoming data
-					} else if (key.isReadable()) {
-						//socket received new data
-						try (SocketChannel socketChannel = (SocketChannel) key.channel()) {
-							ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
-							socketChannel.read(byteBuffer);
-							byteBuffer.flip();
+                Set<SelectionKey> keys = selector.selectedKeys();
+                Iterator<SelectionKey> keyIterator = keys.iterator();
+                while (keyIterator.hasNext()) {
+                    SelectionKey key = keyIterator.next();
 
-							CharBuffer charBuffer = Charset.forName("US-ASCII").decode(byteBuffer);
-							String message = charBuffer.toString();
-							System.out.println(">>received " + message);
+                    if (key.isAcceptable()) {
+                        //incoming connection
+                        Socket newSocket = serverSocket.accept();
 
-							processMessage(message);
-						} catch (IOException e) {
-							key.cancel();
-						}
-					}
-					keyIterator.remove();
-				}
-			}
-		} catch (IOException e) {
-			System.out.println(e.getMessage());
-		}
-	}
+                        SocketChannel socketChannel = newSocket.getChannel();
+                        socketChannel.configureBlocking(false);
+                        socketChannel.register(selector, SelectionKey.OP_READ); //wait for incoming data
 
-	private void processMessage(String message) throws IOException {
-		String[] parsedMessage = message.split(" ");
+                        hostIPs.put(socketChannel, newSocket.getInetAddress());
+                        hostPorts.put(socketChannel, newSocket.getPort());
+                        hostStates.put(socketChannel, ConnectionState.UNKNOWN);
 
-		switch (parsedMessage[0]) {
-			case "connect": {
-				for(int i = 1; i < parsedMessage.length - 1; i+=2) {
-					InetAddress ip = InetAddress.getByName(parsedMessage[i]);
-					int port = Integer.valueOf(parsedMessage[i + 1]);
-					MyInetStruct tmpStruct = new MyInetStruct(ip, port);
-					connect(tmpStruct);
-				}
-				break;
-			}
-			case "conn_net": {
-				//TODO
-				InetAddress ip = InetAddress.getByName(parsedMessage[1]);
-				int port = Integer.valueOf(parsedMessage[2]);
-				conn_net(ip, port);
-				break;
-			}
-			case "request_hosts": {
-				InetAddress ip = InetAddress.getByName(parsedMessage[1]);
-				int port = Integer.valueOf(parsedMessage[2]);
-				request_hosts(ip, port);
-				break;
-			}
-			case "print_hosts":
-				print_hosts();
-				break;
-			case "exit":
-				myExit();
-				break;
-			case "help":
-				myHelp();
-				break;
-			default:
-				System.out.println("Illegal command!");
-				break;
-		}
-	}
+                        System.out.println(">>accepting new connection from " + newSocket.getInetAddress() + ":" + newSocket.getPort());
+                    } else if (key.isReadable()) {
+                        //socket received new data
+                        SocketChannel socketChannel = (SocketChannel) key.channel();
 
-	private class MyInetStruct {
-		MyInetStruct(InetAddress ip, int port) {
-			this.ip = ip;
-			this.port = port;
-		}
+                        ByteBuffer byteBuffer = ByteBuffer.allocate(1024);
+                        socketChannel.read(byteBuffer);
+                        byteBuffer.flip();
 
-		InetAddress ip;
-		int port;
-	}
+                        CharBuffer charBuffer = Charset.forName("US-ASCII").decode(byteBuffer);
+                        String message = charBuffer.toString();
 
+                        processMessage(message, socketChannel);
 
-	private static void print_hosts() {
-		for (int i = 0; i < hosts.size(); i++) {
-			System.out.print(hosts.get(i) + " ");
-		}
-		System.out.println();
-	}
+                        socketChannel.register(selector, SelectionKey.OP_READ); //wait for incoming data
+                    }
+                    keyIterator.remove();
+                }
+            }
+        } catch (IOException e1) {
+            e1.printStackTrace();
+        }
+    }
 
+    private void processMessage(String message, SocketChannel socketChannel) throws IOException {
+        String[] parsedMessage = message.trim().split(" ");
+        if (parsedMessage[0].equals("init")) {
+            if (hostStates.get(socketChannel).equals(ConnectionState.UNKNOWN)) {
+                InetAddress ip = InetAddress.getByName(parsedMessage[1]);
+                int port = Integer.valueOf(parsedMessage[2]);
 
-	private void conn_net(InetAddress ip, int port) {
-		//TODO
-	}
+                hostStates.put(socketChannel, ConnectionState.MACHINE);
+                hostIPs.put(socketChannel, ip);
+                hostPorts.put(socketChannel, port);
+            } else {
+                hostStates.put(socketChannel, ConnectionState.PERSON);
+            }
+            return;
+        }
 
-	private void request_hosts(MyInetStruct struct) throws IOException {
-		Socket destination = hosts.get(struct);
-		PrintWriter out = new PrintWriter(destination.getOutputStream());
+        if (hostStates.get(socketChannel).equals(ConnectionState.UNKNOWN)) {
+            hostStates.put(socketChannel, ConnectionState.PERSON);
+        }
+        switch (parsedMessage[0]) {
+            case "connect": {
+                for (int i = 1; i < parsedMessage.length - 1; i += 2) {
+                    InetAddress ip = InetAddress.getByName(parsedMessage[i]);
+                    int port = Integer.valueOf(parsedMessage[i + 1]);
+                    connect(new MyInetStruct(ip, port));
+                }
+                break;
+            }
+            case "conn_net": {
+                //TODO
+                InetAddress ip = InetAddress.getByName(parsedMessage[1]);
+                int port = Integer.valueOf(parsedMessage[2]);
+                conn_net(ip, port);
+                break;
+            }
+            case "request_hosts": {
+                InetAddress ip = InetAddress.getByName(parsedMessage[1]);
+                int port = Integer.valueOf(parsedMessage[2]);
+                request_hosts(new MyInetStruct(ip, port));
+                break;
+            }
+            case "print_hosts":
+                print_hosts(socketChannel);
+                break;
+            case "exit":
+                myExit();
+                break;
+            default:
+                System.out.println("Illegal command!");
+                break;
+        }
+    }
 
-	}
+    private class MyInetStruct {
+        MyInetStruct(InetAddress ip, int port) {
+            this.ip = ip;
+            this.port = port;
+        }
 
-	/*private void connect(MyInetStruct... struct) throws IOException {
-		for (MyInetStruct st: struct) {
-			hosts.put(st, new Socket(st.ip, st.port));
-		}
-	}*/
+        InetAddress ip;
+        int port;
+    }
 
+    private void print_hosts(SocketChannel socketChannel) throws IOException {
+        for (SocketChannel channel : hostIPs.keySet()) {
+            String response = hostIPs.get(channel).getHostAddress() + ":" + hostPorts.get(channel) + " " + hostStates.get(channel);
+            ByteBuffer buffer = ByteBuffer.allocate(1024);
+            buffer.clear();
+            buffer.put(response.getBytes());
+            buffer.flip();
 
-	private void connect(MyInetStruct struct) throws IOException {
-		hosts.put(struct, new Socket(struct.ip, struct.port));
-	}
+            while (buffer.hasRemaining()) {
+                socketChannel.write(buffer);
+            }
+        }
+    }
 
-	private void myExit() {
-		//TODO
-	}
+    private void conn_net(InetAddress ip, int port) {
+        //TODO
+    }
 
-	private void myHelp() {
-		//TODO
-		System.out.println("LOL");
-	}
+    private void request_hosts(MyInetStruct struct) throws IOException {
+        StringBuilder response = new StringBuilder("connect");
+        for (SocketChannel channel : hostIPs.keySet()) {
+            if (!hostStates.get(channel).equals(ConnectionState.MACHINE)) {
+                continue;
+            }
 
+            response.append(" ")
+                    .append(hostIPs.get(channel).getHostAddress())
+                    .append(" ")
+                    .append(hostPorts.get(channel));
+        }
+        if (response.toString().equals("connect")) {
+            return;
+        }
 
-	public static void main(String[] args) {
-		System.out.println("Please enter your port:");
-		Scanner scanner = new Scanner(System.in);
-		int port = scanner.nextInt();
-		new Server(port);
-	}
+        //TODO: new connection or find existent
+        SocketChannel destination = null;
+        for (SocketChannel channel : hostIPs.keySet()) {
+            if (hostIPs.get(channel).equals(struct.ip) && hostPorts.get(channel).equals(struct.port)) {
+                destination = channel;
+                break;
+            }
+        }
+        if (destination == null) {
+            return;
+        }
+
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        buffer.clear();
+        buffer.put(response.toString().getBytes());
+        buffer.flip();
+
+        while (buffer.hasRemaining()) {
+            destination.write(buffer);
+        }
+    }
+
+    private void connect(MyInetStruct remote) throws IOException {
+        SocketAddress address = new InetSocketAddress(remote.ip, remote.port);
+        SocketChannel client = SocketChannel.open(address);
+
+        //send init
+        ByteBuffer buffer = ByteBuffer.allocate(1024);
+        buffer.clear();
+        buffer.put(("init " + this.serverIP.getHostAddress() + " " + this.serverPort).getBytes());
+        buffer.flip();
+
+        while (buffer.hasRemaining()) {
+            client.write(buffer);
+        }
+
+        hostStates.put(client, ConnectionState.MACHINE);
+        hostIPs.put(client, remote.ip);
+        hostPorts.put(client, remote.port);
+    }
+
+    private void myExit() {
+        //TODO
+    }
+
+    public static void main(String[] args) throws UnknownHostException {
+        System.out.println("Please enter your ip and port:");
+        Scanner scanner = new Scanner(System.in);
+        //String ip = scanner.nextLine();
+        String ip = "localhost";
+        int port = scanner.nextInt();
+        new Server(ip, port);
+    }
 }
